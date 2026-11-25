@@ -1,0 +1,262 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="theme-color" content="#000000">
+<title>Counter Spin</title>
+<style>
+  :root { --bg:#000; --panel:#16161a; --fg:#f2f2f2; --muted:#8b8b95; --accent:#ffb020; --line:#2c2c33; }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font:15px/1.3 system-ui, -apple-system, Segoe UI, Roboto, sans-serif; overflow:hidden; overscroll-behavior:none; }
+  #stage { position:fixed; inset:0; touch-action:none; overflow:hidden; user-select:none; -webkit-user-select:none; }
+  #img, #vid { position:absolute; left:50%; top:50%; transform-origin:0 0; display:none;
+    will-change:transform; pointer-events:none; -webkit-user-drag:none; }
+  #hint { position:absolute; inset:0; display:grid; place-items:center; text-align:center; color:var(--muted); padding:2rem; pointer-events:none; }
+  #pivot { position:absolute; left:50%; top:50%; width:18px; height:18px; margin:-9px; border:1px solid #ffffff33;
+    border-radius:50%; pointer-events:none; display:none; }
+  #pivot::after { content:""; position:absolute; left:50%; top:50%; width:4px; height:4px; margin:-2px; background:#ffffff55; border-radius:50%; }
+  body.show-pivot #pivot { display:block; }
+
+  #panel { position:fixed; left:0; right:0; bottom:0; background:var(--panel); border-top:1px solid var(--line);
+    padding:12px 14px calc(12px + env(safe-area-inset-bottom)); display:grid; gap:12px;
+    transition:transform .25s ease; max-width:560px; margin:0 auto; border-radius:16px 16px 0 0; }
+  body.hide-ui #panel { transform:translateY(110%); }
+  #toggle { position:fixed; right:12px; top:calc(10px + env(safe-area-inset-top)); width:42px; height:42px; border-radius:50%;
+    border:1px solid var(--line); background:#16161acc; color:var(--fg); font-size:20px; z-index:5; }
+  .row { display:flex; gap:10px; align-items:center; }
+  .row > * { flex:1; }
+  button, label.btn { appearance:none; border:1px solid var(--line); background:#202027; color:var(--fg);
+    padding:12px; border-radius:12px; font:inherit; text-align:center; cursor:pointer; }
+  button:active, label.btn:active { filter:brightness(1.3); }
+  .seg { display:flex; border:1px solid var(--line); border-radius:12px; overflow:hidden; }
+  .seg button { border:0; border-radius:0; flex:1; background:#202027; }
+  .seg button.on { background:var(--accent); color:#000; font-weight:700; }
+  #go { background:var(--accent); color:#000; font-weight:700; border-color:var(--accent); }
+  #go.running { background:#e5484d; border-color:#e5484d; color:#fff; }
+  .small { font-size:12px; color:var(--muted); }
+  input[type=range] { width:100%; accent-color:var(--accent); }
+  input[type=file] { display:none; }
+  .lbl { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  .lbl > span:first-child { color:var(--muted); font-size:13px; white-space:nowrap; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="hint">Pick an image or video,<br>choose 33 or 45, press Start.<br><br>
+    <span class="small">Drag to move · pinch / slider to resize</span></div>
+  <div id="pivot"></div>
+  <img id="img" alt="" style="display:none">
+  <video id="vid" loop playsinline style="display:none"></video>
+</div>
+
+<button id="toggle" aria-label="Show or hide controls">☰</button>
+
+<div id="panel">
+  <div class="row">
+    <label class="btn" for="file">📁 Choose image / video</label>
+    <input id="file" type="file" accept="image/*,video/*">
+  </div>
+  <div class="row">
+    <div class="seg" id="rpm">
+      <button data-rpm="33.3333333" class="on">33⅓ RPM</button>
+      <button data-rpm="45">45 RPM</button>
+    </div>
+    <button id="go">▶ Start</button>
+  </div>
+  <div class="lbl"><span>Size</span><input id="size" type="range" min="5" max="400" value="100"><span id="sizeVal" class="small">100%</span></div>
+  <div class="lbl"><span>Spin around</span>
+    <div class="seg" id="mode" style="flex:1">
+      <button data-mode="screen" class="on">Screen centre</button>
+      <button data-mode="self">Visual centre</button>
+    </div>
+  </div>
+  <div class="row">
+    <button id="reset">Reset position</button>
+    <button id="full">Fullscreen</button>
+  </div>
+  <div class="small">Phone on the platter: the visual turns counter-clockwise so it appears to stand still.
+    “Screen centre” = spindle at screen centre (put the phone’s centre on the spindle).</div>
+</div>
+
+<script>
+(() => {
+  const $ = id => document.getElementById(id);
+  const stage = $('stage'), img = $('img'), vid = $('vid'), hint = $('hint');
+  const state = {
+    el: null,            // active media element
+    nw: 0, nh: 0,        // natural size
+    x: 0, y: 0,          // offset from pivot (screen centre), in unrotated layer coords
+    scale: 1,            // 1 = base size
+    base: 1,             // px per natural px at 100%
+    rpm: 100/3,
+    mode: 'screen',
+    running: false,
+    angle: 0,            // degrees the platter has turned (clockwise)
+    last: 0,
+    url: null,
+  };
+
+  const dps = () => state.rpm * 360 / 60;   // degrees per second
+
+  function layout() {
+    const el = state.el; if (!el) return;
+    const w = state.nw, h = state.nh, s = state.base * state.scale;
+    const a = -state.angle; // counter-rotate
+    // transform-origin is 0 0 at the pivot (screen centre); we centre the media on its own midpoint manually
+    const half = `translate(${-w/2}px, ${-h/2}px)`;
+    el.style.width = w + 'px'; el.style.height = h + 'px';
+    el.style.transform = state.mode === 'screen'
+      ? `rotate(${a}deg) translate(${state.x}px, ${state.y}px) scale(${s}) ${half}`
+      : `translate(${state.x}px, ${state.y}px) rotate(${a}deg) scale(${s}) ${half}`;
+  }
+
+  function tick(t) {
+    if (!state.running) return;
+    const dt = (t - state.last) / 1000; state.last = t;
+    state.angle = (state.angle + dps() * dt) % 360;
+    layout();
+    requestAnimationFrame(tick);
+  }
+
+  function start() {
+    if (!state.el) { $('file').click(); return; }
+    state.running = true; state.last = performance.now();
+    $('go').textContent = '■ Stop'; $('go').classList.add('running');
+    if (state.el === vid) vid.play().catch(()=>{});
+    document.body.classList.add('show-pivot');
+    keepAwake(true);
+    document.body.classList.add('hide-ui');
+    requestAnimationFrame(tick);
+  }
+  function stop() {
+    state.running = false;
+    $('go').textContent = '▶ Start'; $('go').classList.remove('running');
+    document.body.classList.remove('show-pivot');
+    keepAwake(false);
+  }
+
+  // ---- file loading
+  $('file').addEventListener('change', e => {
+    const f = e.target.files[0]; if (!f) return;
+    if (state.url) URL.revokeObjectURL(state.url);
+    state.url = URL.createObjectURL(f);
+    const isVideo = f.type.startsWith('video/');
+    img.style.display = vid.style.display = 'none';
+    vid.pause();
+    const ready = (el, w, h) => {
+      state.el = el; state.nw = w; state.nh = h;
+      const vmin = Math.min(innerWidth, innerHeight);
+      state.base = (vmin * 0.8) / Math.max(w, h);
+      state.scale = 1; state.x = state.y = 0;
+      $('size').value = 100; $('sizeVal').textContent = '100%';
+      el.style.display = 'block'; hint.style.display = 'none';
+      layout();
+      if (isVideo) vid.play().catch(()=>{});
+    };
+    if (isVideo) {
+      vid.onloadedmetadata = () => ready(vid, vid.videoWidth, vid.videoHeight);
+      vid.src = state.url;
+    } else {
+      img.onload = () => ready(img, img.naturalWidth, img.naturalHeight);
+      img.src = state.url;
+    }
+    e.target.value = '';
+  });
+
+  // ---- controls
+  $('rpm').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    state.rpm = parseFloat(b.dataset.rpm);
+    [...$('rpm').children].forEach(c => c.classList.toggle('on', c === b));
+  });
+  $('mode').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    state.mode = b.dataset.mode;
+    [...$('mode').children].forEach(c => c.classList.toggle('on', c === b));
+    state.x = state.y = 0; layout();
+  });
+  $('go').addEventListener('click', () => state.running ? stop() : start());
+  $('size').addEventListener('input', e => {
+    state.scale = e.target.value / 100; $('sizeVal').textContent = e.target.value + '%'; layout();
+  });
+  function setScale(s) {
+    state.scale = Math.min(4, Math.max(0.05, s));
+    const pct = Math.round(state.scale * 100);
+    $('size').value = pct; $('sizeVal').textContent = pct + '%'; layout();
+  }
+  $('reset').addEventListener('click', () => { state.x = state.y = 0; setScale(1); layout(); });
+  $('toggle').addEventListener('click', () => document.body.classList.toggle('hide-ui'));
+  $('full').addEventListener('click', () => {
+    const d = document.documentElement;
+    if (document.fullscreenElement) document.exitFullscreen();
+    else (d.requestFullscreen || d.webkitRequestFullscreen || (()=>{})).call(d);
+  });
+
+  // ---- drag / pinch on the stage
+  const ptrs = new Map();
+  let pinch = null;
+  // convert a screen-space delta into the layer's coordinates
+  function toLayer(dx, dy) {
+    if (state.mode !== 'screen') return [dx, dy];
+    const r = state.angle * Math.PI / 180, c = Math.cos(r), s = Math.sin(r);
+    // layer is rotated by -angle, so layer = R(+angle) * screen
+    return [dx * c - dy * s, dx * s + dy * c];
+  }
+  stage.addEventListener('pointerdown', e => {
+    stage.setPointerCapture(e.pointerId);
+    ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (ptrs.size === 2) {
+      const [a, b] = [...ptrs.values()];
+      pinch = { d: Math.hypot(a.x - b.x, a.y - b.y), s: state.scale };
+    }
+  });
+  stage.addEventListener('pointermove', e => {
+    const p = ptrs.get(e.pointerId); if (!p || !state.el) return;
+    const dx = e.clientX - p.x, dy = e.clientY - p.y;
+    p.x = e.clientX; p.y = e.clientY;
+    if (ptrs.size === 1) {
+      const [lx, ly] = toLayer(dx, dy); state.x += lx; state.y += ly; layout();
+    } else if (ptrs.size === 2 && pinch) {
+      const [a, b] = [...ptrs.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (pinch.d > 0) setScale(pinch.s * d / pinch.d);
+    }
+  });
+  // a tap (little movement, short press) while spinning stops it and returns to the first screen
+  let tap = null;
+  stage.addEventListener('pointerdown', e => {
+    tap = ptrs.size === 1 ? { x: e.clientX, y: e.clientY, t: performance.now() } : null;
+  });
+  stage.addEventListener('pointermove', e => {
+    if (tap && Math.hypot(e.clientX - tap.x, e.clientY - tap.y) > 10) tap = null;
+  });
+  const up = e => {
+    if (tap && e.type === 'pointerup' && state.running && performance.now() - tap.t < 400) {
+      stop();
+      state.angle = 0;
+      layout();
+      document.body.classList.remove('hide-ui');
+    }
+    tap = null;
+    ptrs.delete(e.pointerId); if (ptrs.size < 2) pinch = null;
+  };
+  stage.addEventListener('pointerup', up);
+  stage.addEventListener('pointercancel', up);
+  stage.addEventListener('wheel', e => { e.preventDefault(); setScale(state.scale * (e.deltaY < 0 ? 1.06 : 1/1.06)); }, { passive: false });
+  addEventListener('resize', layout);
+
+  // ---- keep screen on while spinning
+  let lock = null;
+  async function keepAwake(on) {
+    try {
+      if (on && 'wakeLock' in navigator) lock = await navigator.wakeLock.request('screen');
+      else if (lock) { await lock.release(); lock = null; }
+    } catch (_) {}
+  }
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && state.running) keepAwake(true); });
+})();
+</script>
+</body>
+</html>
