@@ -69,3 +69,7 @@ To try it locally: `python -m http.server`, then open `http://<your-pc-ip>:8000`
 - **Tested only on Android** (Chrome). It has not been tested in any iOS browser. The iOS code paths (motion-sensor permission prompt, reversed accelerometer sign, gyro axis mapping) are written from the specs and may need fixes.
 - The screen is kept awake while spinning (Screen Wake Lock, where supported).
 - Media stays on the device. Nothing is uploaded.
+
+## License
+
+Licensed under the GNU General Public License v3.0 (GPL-3.0). You are free to use, study, modify and share it; if you distribute a modified version, you must release it under the same license. See [LICENSE](LICENSE).
