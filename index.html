@@ -18,6 +18,7 @@
     border-radius:50%; pointer-events:none; display:none; }
   #pivot::after { content:""; position:absolute; left:50%; top:50%; width:4px; height:4px; margin:-2px; background:#ffffff55; border-radius:50%; }
   body.show-pivot #pivot { display:block; }
+  #rpmOut { position:absolute; left:12px; top:calc(10px + env(safe-area-inset-top)); color:#ffffff66; font:12px/1.3 ui-monospace, monospace; pointer-events:none; white-space:pre; }
 
   #panel { position:fixed; left:0; right:0; bottom:0; background:var(--panel); border-top:1px solid var(--line);
     padding:12px 14px calc(12px + env(safe-area-inset-bottom)); display:grid; gap:12px;
@@ -40,13 +41,21 @@
   input[type=file] { display:none; }
   .lbl { display:flex; justify-content:space-between; align-items:center; gap:8px; }
   .lbl > span:first-child { color:var(--muted); font-size:13px; white-space:nowrap; }
+  #panel { max-height:88vh; overflow-y:auto; }
+  #go:disabled { opacity:.35; cursor:not-allowed; }
+  details summary { cursor:pointer; color:var(--muted); padding:6px 0; list-style:none; user-select:none; }
+  details summary::-webkit-details-marker { display:none; }
+  details summary::before { content:"\25B8  "; }
+  details[open] summary::before { content:"\25BE  "; }
+  .morebody { display:grid; gap:12px; padding-top:6px; }
 </style>
 </head>
 <body>
 <div id="stage">
-  <div id="hint">Pick an image or video,<br>choose 33 or 45, press Start.<br><br>
+  <div id="hint">Pick an image or video,<br>choose Auto, 33 or 45, press Start.<br><br>
     <span class="small">Drag to move · pinch / slider to resize</span></div>
   <div id="pivot"></div>
+  <div id="rpmOut"></div>
   <img id="img" alt="" style="display:none">
   <video id="vid" loop playsinline style="display:none"></video>
 </div>
@@ -55,29 +64,53 @@
 
 <div id="panel">
   <div class="row">
-    <label class="btn" for="file">📁 Choose image / video</label>
+    <label class="btn" for="file">&#128193; Choose image / video</label>
     <input id="file" type="file" accept="image/*,video/*">
   </div>
   <div class="row">
     <div class="seg" id="rpm">
-      <button data-rpm="33.3333333" class="on">33⅓ RPM</button>
+      <button data-rpm="auto" class="on">Auto</button>
+      <button data-rpm="33.3333333">33&#8531; RPM</button>
       <button data-rpm="45">45 RPM</button>
     </div>
-    <button id="go">▶ Start</button>
+    <button id="go" disabled>&#9654; Start</button>
   </div>
   <div class="lbl"><span>Size</span><input id="size" type="range" min="5" max="400" value="100"><span id="sizeVal" class="small">100%</span></div>
-  <div class="lbl"><span>Spin around</span>
-    <div class="seg" id="mode" style="flex:1">
-      <button data-mode="screen" class="on">Screen centre</button>
-      <button data-mode="self">Visual centre</button>
-    </div>
-  </div>
   <div class="row">
     <button id="reset">Reset position</button>
     <button id="full">Fullscreen</button>
   </div>
-  <div class="small">Phone on the platter: the visual turns counter-clockwise so it appears to stand still.
-    “Screen centre” = spindle at screen centre (put the phone’s centre on the spindle).</div>
+  <details id="more">
+    <summary>More controls</summary>
+    <div class="morebody">
+      <div class="lbl"><span>Spin around</span>
+        <div class="seg" id="mode" style="flex:1">
+          <button data-mode="self" class="on">Visual centre</button>
+          <button data-mode="screen">Screen centre</button>
+        </div>
+      </div>
+      <div class="lbl"><span>Spindle</span>
+        <div class="seg" id="loc" style="flex:1">
+          <button data-loc="0" class="on">Screen centre</button>
+          <button data-loc="1">Auto-locate (sensor)</button>
+        </div>
+      </div>
+      <div id="logbox" style="display:none">
+        <div class="row">
+          <button id="logCopy">Copy log</button>
+          <button id="logSave">Download CSV</button>
+        </div>
+        <div id="logInfo" class="small" style="margin:6px 0"></div>
+        <textarea id="logText" readonly rows="5" style="width:100%;background:#0e0e11;color:#cfcfd6;border:1px solid var(--line);border-radius:8px;font:11px/1.3 ui-monospace,monospace"></textarea>
+      </div>
+      <div class="small">Phone on the platter: the visual turns counter-clockwise so it appears to stand still.
+        <b>Auto (gyro)</b> follows the real platter speed. <b>Auto-locate</b>: if the phone is not centred on the spindle,
+        press Start with the platter stopped, then switch the turntable on; the sensors find the spindle and the picture
+        stays fixed in the room (readout at top left). <b>Spin around</b>: &ldquo;Screen centre&rdquo; keeps the picture
+        still when the spindle is under the screen centre; &ldquo;Visual centre&rdquo; just spins the picture on its own centre.
+       </div>
+    </div>
+  </details>
 </div>
 
 <script>
@@ -90,38 +123,193 @@
     x: 0, y: 0,          // offset from pivot (screen centre), in unrotated layer coords
     scale: 1,            // 1 = base size
     base: 1,             // px per natural px at 100%
-    rpm: 100/3,
-    mode: 'screen',
+    rpm: 'auto',         // 'auto' = follow the gyroscope, otherwise a fixed RPM
+    mode: 'self',
+    px: 0, py: 0,        // spindle position relative to screen centre (auto-locate)
     running: false,
     angle: 0,            // degrees the platter has turned (clockwise)
     last: 0,
     url: null,
   };
 
-  const dps = () => state.rpm * 360 / 60;   // degrees per second
+  const dps = () => state.rpm * 360 / 60;   // degrees per second (fixed speeds only)
+  const rpmOut = $('rpmOut');
+
+  // ---- motion sensors: platter speed (Auto RPM) and spindle position (Auto-locate)
+  // Assumes the phone lies screen-up on the platter. The gyro rate is projected onto the
+  // vertical (gravity) axis so a slightly tilted platter still works.
+  const auto = { on: false, lastT: 0, smooth: 0, got: false, timer: 0 };
+  const gm = { a: 0, b: 0, alt: false };     // gyro axis mapping detector
+  // Auto-locate: a phone circling the spindle at distance r feels a = w^2 * r towards the spindle, constant in the
+  // phone's own frame. Fit that against w^2 (least squares) after subtracting the resting reading (tilt + bias).
+  const PPM = 160 / 0.0254;           // CSS px per metre (1 CSS px ~ 1/160 inch on phones); only a rough guess
+  const loc = { on: false, bn: 0, bx: 0, by: 0, sxw: 0, syw: 0, sww: 0, spin: 0, est: null };
+  function locReset() { Object.assign(loc, { bn: 0, bx: 0, by: 0, sxw: 0, syw: 0, sww: 0, spin: 0, est: null, raw: null, fx: undefined, fy: undefined }); }
+
+  // ---- sensor log: one row every 100 ms while the sensors run; kept after Stop for copy / download
+  const LOG_HEAD = 't_s,platter_dps,gyro_alpha,gyro_beta,gyro_gamma,accG_x,accG_y,accG_z,lin_x,lin_y,lin_z,rest_x,rest_y,fit_dx_cm,fit_dy_cm,est_x_px,est_y_px,pivot_x_px,pivot_y_px,angle_deg,gyro_map';
+  const log = { rows: [], t0: 0, next: 0 };
+  const num = (v, d) => (v == null || isNaN(v)) ? '' : (+v).toFixed(d);
+  function logClear() { log.rows = []; log.t0 = 0; log.next = 0; $('logbox').style.display = 'none'; }
+  function logRow(now, platter, rr, g, lin) {
+    if (!log.t0) log.t0 = now;
+    if (now < log.next) return;
+    log.next = now + 100;
+    log.rows.push([
+      num((now - log.t0) / 1000, 2), num(platter, 1),
+      num(rr.alpha, 1), num(rr.beta, 1), num(rr.gamma, 1),
+      g ? num(g.x, 3) : '', g ? num(g.y, 3) : '', g ? num(g.z, 3) : '',
+      lin ? num(lin.x, 3) : '', lin ? num(lin.y, 3) : '', lin ? num(lin.z, 3) : '',
+      num(loc.bx, 3), num(loc.by, 3),
+      loc.raw ? num(loc.raw.dx * 100, 2) : '', loc.raw ? num(loc.raw.dy * 100, 2) : '',
+      loc.est ? num(loc.est.x, 1) : '', loc.est ? num(loc.est.y, 1) : '',
+      num(state.px, 1), num(state.py, 1), num(state.angle, 1), gm.alt ? 'B' : 'A'
+    ].join(','));
+  }
+  function logText() {
+    const head = '# rpmMode=' + state.rpm + ' locate=' + loc.on + ' dpr=' + devicePixelRatio + ' screen=' + innerWidth + 'x' + innerHeight + ' rows=' + log.rows.length;
+    return head + '\n' + LOG_HEAD + '\n' + log.rows.join('\n');
+  }
+  function showLog() {
+    if (!log.rows.length) return;
+    $('logbox').style.display = 'block';
+    $('logInfo').textContent = log.rows.length + ' rows (10 per second, ' + ((log.rows.length) / 10).toFixed(0) + ' s). Kept until the next Start.';
+    $('logText').value = logText();
+  }
+  $('logCopy').addEventListener('click', async () => {
+    const t = logText(), b = $('logCopy');
+    let ok = false;
+    try { await navigator.clipboard.writeText(t); ok = true; } catch (_) {}
+    if (!ok) { const ta = $('logText'); ta.value = t; ta.focus(); ta.select(); try { ok = document.execCommand('copy'); } catch (_) {} }
+    b.textContent = ok ? 'Copied!' : 'Copy failed: select the text below';
+    setTimeout(() => { b.textContent = 'Copy log'; }, 2000);
+  });
+  $('logSave').addEventListener('click', () => {
+    const url = URL.createObjectURL(new Blob([logText()], { type: 'text/csv' }));
+    const a = document.createElement('a'); a.href = url; a.download = 'turntable-log.csv';
+    document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(url), 5000);
+  });
+
+  function readout() {
+    const lines = [];
+    if (state.rpm === 'auto') lines.push('AUTO ' + (auto.smooth / 6).toFixed(1) + ' RPM');
+    if (loc.on) {
+      if (loc.est) lines.push('Spindle ' + loc.est.cm.toFixed(1) + ' cm away (x ' + (loc.est.x / PPM * 100).toFixed(1) + ', y ' + (-loc.est.y / PPM * 100).toFixed(1) + ' cm)');
+      else if (Math.abs(auto.smooth) < 60 || !auto.got) lines.push('Spindle: ' + (loc.bn > 20 ? 'calibrated, switch the turntable on' : 'keep platter still...'));
+      else lines.push('Spindle: measuring... ' + Math.max(0, 2 - loc.spin).toFixed(1) + ' s');
+    }
+    if (loc.on) {
+      if (loc.fx === undefined) lines.push('DEBUG: no accelerometer data from this browser');
+      else lines.push('DEBUG gyro' + (gm.alt ? 'B' : 'A') + ' w ' + auto.smooth.toFixed(0) + ' deg/s | f ' + loc.fx.toFixed(2) + ', ' + loc.fy.toFixed(2) + ' | rest ' + loc.bx.toFixed(2) + ', ' + loc.by.toFixed(2) + ' (n ' + loc.bn + ')' +
+        (loc.raw ? ' | fit ' + (loc.raw.dx * 100).toFixed(1) + ', ' + (loc.raw.dy * 100).toFixed(1) + ' cm' : ''));
+    }
+    rpmOut.textContent = lines.join('\n');
+  }
+
+  function onMotion(e) {
+    const rr = e.rotationRate, g = e.accelerationIncludingGravity;
+    if (!rr || rr.alpha == null) return;
+    const now = performance.now();
+    let yaw = rr.alpha; // deg/s around the screen normal; + = counter-clockwise seen from above
+    if (g && g.x != null && g.z != null) {
+      const sgn = g.z >= 0 ? 1 : -1;          // makes "up" point out of the screen on Android and iOS alike
+      const ux = g.x * sgn, uy = g.y * sgn, uz = g.z * sgn;
+      const n = Math.hypot(ux, uy, uz) || 1;
+      // Browsers disagree on which gyro field is which axis: W3C says alpha = z (iOS Safari); some Android Chrome
+      // builds report alpha, beta, gamma = x, y, z. Both are projected on "up"; the mapping that shows the larger rate wins.
+      const yawSpec = (rr.beta * ux + rr.gamma * uy + rr.alpha * uz) / n;
+      const yawAlt = (rr.alpha * ux + rr.beta * uy + rr.gamma * uz) / n;
+      gm.a += (Math.abs(yawSpec) - gm.a) * 0.05; gm.b += (Math.abs(yawAlt) - gm.b) * 0.05;
+      gm.alt = gm.b > gm.a;
+      yaw = gm.alt ? yawAlt : yawSpec;
+    }
+    const platter = -yaw;                      // clockwise platter = positive
+    const dt = auto.lastT ? Math.min((now - auto.lastT) / 1000, 0.1) : 0;
+    auto.lastT = now; auto.got = true;
+    if (state.rpm === 'auto') state.angle += platter * dt;   // platter turns the phone clockwise; visual turns back
+    auto.smooth += (platter - auto.smooth) * Math.min(1, dt * 3);
+
+    if (loc.on && g && g.x != null && g.z != null) {
+      const sgn = g.z >= 0 ? 1 : -1;           // normalise iOS (reversed sign) to "specific force"
+      const fx = g.x * sgn, fy = g.y * sgn;
+      loc.fx = fx; loc.fy = fy;
+      const ap = Math.abs(platter);
+      if (ap < 5) {                            // platter still: learn the resting reading (tilt + bias)
+        loc.bn = Math.min(loc.bn + 1, 300);
+        loc.bx += (fx - loc.bx) / loc.bn; loc.by += (fy - loc.by) / loc.bn;
+      } else if (ap > 60 && dt > 0) {          // spinning: least-squares fit of a = w^2 * d
+        const w = platter * Math.PI / 180, w2 = w * w, k = Math.exp(-dt / 6);
+        loc.sxw = loc.sxw * k + (fx - loc.bx) * w2;
+        loc.syw = loc.syw * k + (fy - loc.by) * w2;
+        loc.sww = loc.sww * k + w2 * w2;
+        loc.spin += dt;
+        if (loc.spin > 2 && loc.sww > 0) {
+          const dx = loc.sxw / loc.sww, dy = loc.syw / loc.sww;   // metres, device axes (x right, y up) -> spindle
+          const cm = Math.hypot(dx, dy) * 100;
+          loc.raw = { dx, dy, cm };
+          if (cm < 40) loc.est = { x: dx * PPM, y: -dy * PPM, cm };
+        }
+      }
+    }
+    logRow(now, platter, rr, g, e.acceleration);
+    readout();
+  }
+  async function motionStart() {
+    try {
+      if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+        const r = await DeviceMotionEvent.requestPermission();
+        if (r !== 'granted') throw new Error('denied');
+      }
+    } catch (_) { rpmOut.textContent = 'Motion sensor permission denied'; return false; }
+    auto.on = true; auto.lastT = 0; auto.smooth = 0; auto.got = false; gm.a = gm.b = 0; gm.alt = false; locReset(); logClear();
+    addEventListener('devicemotion', onMotion);
+    rpmOut.textContent = 'Waiting for sensor...';
+    auto.timer = setTimeout(() => { if (!auto.got) rpmOut.textContent = 'No motion sensor data (needs HTTPS and a gyroscope)'; }, 1500);
+    return true;
+  }
+  function motionStop() {
+    auto.on = false; clearTimeout(auto.timer);
+    removeEventListener('devicemotion', onMotion);   // the last readout and the log stay visible
+    showLog();
+  }
+  const needsMotion = () => state.rpm === 'auto' || loc.on;
 
   function layout() {
+    $('pivot').style.transform = `translate(${state.px}px, ${state.py}px)`;
     const el = state.el; if (!el) return;
     const w = state.nw, h = state.nh, s = state.base * state.scale;
     const a = -state.angle; // counter-rotate
     // transform-origin is 0 0 at the pivot (screen centre); we centre the media on its own midpoint manually
     const half = `translate(${-w/2}px, ${-h/2}px)`;
     el.style.width = w + 'px'; el.style.height = h + 'px';
-    el.style.transform = state.mode === 'screen'
-      ? `rotate(${a}deg) translate(${state.x}px, ${state.y}px) scale(${s}) ${half}`
-      : `translate(${state.x}px, ${state.y}px) rotate(${a}deg) scale(${s}) ${half}`;
+    const px = state.px, py = state.py;
+    el.style.transform = state.mode === 'self'
+      ? `translate(${state.x}px, ${state.y}px) rotate(${a}deg) scale(${s}) ${half}`
+      : `translate(${px}px, ${py}px) rotate(${a}deg) translate(${state.x}px, ${state.y}px) scale(${s}) ${half}`;
+  }
+
+  // move the spindle point without moving the picture on screen (compensate x,y for the current angle)
+  function movePivot(nx, ny) {
+    const r = -state.angle * Math.PI / 180, c = Math.cos(r), s = Math.sin(r);
+    const sx = state.px + c * state.x - s * state.y, sy = state.py + s * state.x + c * state.y;
+    const dx = sx - nx, dy = sy - ny;
+    state.x = c * dx + s * dy; state.y = -s * dx + c * dy;
+    state.px = nx; state.py = ny; layout();
   }
 
   function tick(t) {
     if (!state.running) return;
     const dt = (t - state.last) / 1000; state.last = t;
-    state.angle = (state.angle + dps() * dt) % 360;
-    layout();
+    if (state.rpm !== 'auto') state.angle = (state.angle + dps() * dt) % 360; // auto: angle is integrated from the gyro
+    if (loc.on && loc.est && state.mode === 'screen') {
+      movePivot(state.px + (loc.est.x - state.px) * 0.08, state.py + (loc.est.y - state.py) * 0.08);
+    } else layout();
     requestAnimationFrame(tick);
   }
 
-  function start() {
-    if (!state.el) { $('file').click(); return; }
+  async function start() {
+    if (!state.el) return;
+    if (needsMotion() && !(await motionStart())) return;
     state.running = true; state.last = performance.now();
     $('go').textContent = '■ Stop'; $('go').classList.add('running');
     if (state.el === vid) vid.play().catch(()=>{});
@@ -132,26 +320,27 @@
   }
   function stop() {
     state.running = false;
+    if (auto.on) motionStop();
+    movePivot(0, 0);                 // spindle point back to screen centre; the picture stays where it is
     $('go').textContent = '▶ Start'; $('go').classList.remove('running');
     document.body.classList.remove('show-pivot');
     keepAwake(false);
   }
 
   // ---- file loading
-  $('file').addEventListener('change', e => {
-    const f = e.target.files[0]; if (!f) return;
+  function showBlob(f) {
     if (state.url) URL.revokeObjectURL(state.url);
     state.url = URL.createObjectURL(f);
-    const isVideo = f.type.startsWith('video/');
+    const isVideo = (f.type || '').startsWith('video/');
     img.style.display = vid.style.display = 'none';
     vid.pause();
     const ready = (el, w, h) => {
       state.el = el; state.nw = w; state.nh = h;
-      const vmin = Math.min(innerWidth, innerHeight);
-      state.base = (vmin * 0.8) / Math.max(w, h);
-      state.scale = 1; state.x = state.y = 0;
+      state.base = Math.min(innerWidth / w, innerHeight / h);   // fit: touches screen width or height, aspect kept
+      state.scale = 1; state.x = state.y = state.px = state.py = 0;
       $('size').value = 100; $('sizeVal').textContent = '100%';
       el.style.display = 'block'; hint.style.display = 'none';
+      $('go').disabled = false;
       layout();
       if (isVideo) vid.play().catch(()=>{});
     };
@@ -162,20 +351,38 @@
       img.onload = () => ready(img, img.naturalWidth, img.naturalHeight);
       img.src = state.url;
     }
+  }
+  $('file').addEventListener('change', e => {
+    const f = e.target.files[0]; if (!f) return;
+    showBlob(f);
     e.target.value = '';
   });
 
   // ---- controls
   $('rpm').addEventListener('click', e => {
     const b = e.target.closest('button'); if (!b) return;
-    state.rpm = parseFloat(b.dataset.rpm);
+    state.rpm = b.dataset.rpm === 'auto' ? 'auto' : parseFloat(b.dataset.rpm);
     [...$('rpm').children].forEach(c => c.classList.toggle('on', c === b));
   });
+  let prevMode = 'self';
+  const markMode = m => [...$('mode').children].forEach(c => c.classList.toggle('on', c.dataset.mode === m));
+  const markLoc = on => [...$('loc').children].forEach(c => c.classList.toggle('on', (c.dataset.loc === '1') === on));
+  function setMode(m) {
+    state.mode = m; markMode(m);
+    state.x = state.y = state.px = state.py = 0; layout();
+  }
   $('mode').addEventListener('click', e => {
     const b = e.target.closest('button'); if (!b) return;
-    state.mode = b.dataset.mode;
-    [...$('mode').children].forEach(c => c.classList.toggle('on', c === b));
-    state.x = state.y = 0; layout();
+    if (loc.on) { loc.on = false; markLoc(false); }       // choosing a spin-around point by hand ends auto-locate
+    setMode(b.dataset.mode);
+  });
+  $('loc').addEventListener('click', e => {
+    const b = e.target.closest('button'); if (!b) return;
+    const on = b.dataset.loc === '1';
+    if (on === loc.on) return;
+    loc.on = on; markLoc(on);
+    if (on) { prevMode = state.mode; setMode('screen'); }  // auto-locate rotates about the screen point it finds
+    else setMode(prevMode);
   });
   $('go').addEventListener('click', () => state.running ? stop() : start());
   $('size').addEventListener('input', e => {
@@ -186,7 +393,7 @@
     const pct = Math.round(state.scale * 100);
     $('size').value = pct; $('sizeVal').textContent = pct + '%'; layout();
   }
-  $('reset').addEventListener('click', () => { state.x = state.y = 0; setScale(1); layout(); });
+  $('reset').addEventListener('click', () => { state.x = state.y = state.px = state.py = 0; setScale(1); layout(); });
   $('toggle').addEventListener('click', () => document.body.classList.toggle('hide-ui'));
   $('full').addEventListener('click', () => {
     const d = document.documentElement;
@@ -199,7 +406,7 @@
   let pinch = null;
   // convert a screen-space delta into the layer's coordinates
   function toLayer(dx, dy) {
-    if (state.mode !== 'screen') return [dx, dy];
+    if (state.mode === 'self') return [dx, dy];
     const r = state.angle * Math.PI / 180, c = Math.cos(r), s = Math.sin(r);
     // layer is rotated by -angle, so layer = R(+angle) * screen
     return [dx * c - dy * s, dx * s + dy * c];
