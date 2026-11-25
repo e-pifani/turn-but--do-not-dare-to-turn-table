@@ -57,7 +57,7 @@
   <div id="pivot"></div>
   <div id="rpmOut"></div>
   <img id="img" alt="" style="display:none">
-  <video id="vid" loop playsinline style="display:none"></video>
+  <video id="vid" playsinline style="display:none"></video>
 </div>
 
 <button id="toggle" aria-label="Show or hide controls">☰</button>
@@ -326,6 +326,9 @@
     document.body.classList.remove('show-pivot');
     keepAwake(false);
   }
+
+  // loop by hand: the native `loop` attribute froze on the last frame on some Android phones
+  vid.addEventListener('ended', () => { vid.currentTime = 0; vid.play().catch(() => {}); });
 
   // ---- file loading
   function showBlob(f) {
