@@ -4,6 +4,10 @@ Put your phone on a turntable and the picture or video on its screen stays still
 
 The page rotates the visual counter-clockwise at the speed of the platter, so the platter's clockwise turn cancels it out.
 
+## Try it
+
+You can test it live at https://idelabz.com/turn-but--do-not-dare-to-turn-table/ (open it on your phone).
+
 ## Use
 
 1. Open `index.html` in a phone browser (or host it, see below).
